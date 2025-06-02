@@ -2,8 +2,8 @@ const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "ISI_TOKEN_BOT";
-const ADMIN_ID = process.env.ADMIN_ID || "ISI_ADMIN_ID"; // Ganti dengan ID Telegram Admin
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "7661763618:AAFeOnmzGH4tkGl3ygv1qiVRQyVVeQ5fo-A";
+const ADMIN_ID = process.env.ADMIN_ID || "7857630943"; // Ganti dengan ID Telegram Admin
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
 const app = express();
