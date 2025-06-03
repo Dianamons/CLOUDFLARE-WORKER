@@ -1,6 +1,10 @@
-// index.js — Bot Telegram Cloudflare Workers & KV + Binding KV ke Worker (FULL FINAL VERSION)
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+
+// === SET ADMIN TELEGRAM ID DI SINI
+const ADMIN_TELEGRAM_ID = "7857630943";
 
 // ENV: TELEGRAM_BOT_TOKEN
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -8,10 +12,29 @@ if (!TOKEN) throw new Error('TELEGRAM_BOT_TOKEN harus diisi.');
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-// Session per user (RAM, non-persistent)
+// --- Session per user (RAM, non-persistent)
 const session = {};
 
-// --- Helper menu
+const USERS_FILE = path.join(__dirname, 'users.json');
+
+// --- Helper: load & save user database
+function loadUsers() {
+  try {
+    return JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+function saveUsers(users) {
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+// --- Helper: waktu ISO ke string lokal
+function formatDate(dt) {
+  return new Date(dt).toISOString().replace('T', ' ').slice(0, 19) + " UTC";
+}
+
+// --- Helper menu utama
 function mainMenu() {
   return {
     reply_markup: {
@@ -29,7 +52,7 @@ function mainMenu() {
   }
 }
 
-// Helper untuk keyboard pilihan dari list
+// --- Helper untuk keyboard pilihan dari list
 function makeKeyboard(items, dataPrefix) {
   return {
     reply_markup: {
@@ -38,19 +61,99 @@ function makeKeyboard(items, dataPrefix) {
   };
 }
 
-// --- START flow
-bot.onText(/\/start/, (msg) => {
-  session[msg.from.id] = { stage: 'await_account_id' };
-  bot.sendMessage(msg.chat.id, 'Selamat datang di Bot Cloudflare!\n\nMasukkan *Account ID* Cloudflare kamu:', { parse_mode: 'Markdown' });
+// --- START flow & registrasi
+bot.onText(/\/start/, async (msg) => {
+  const users = loadUsers();
+  const id = msg.from.id.toString();
+
+  // Sudah pernah daftar dan sudah di-approve
+  if (users[id] && users[id].approved) {
+    session[id] = { stage: 'await_account_id' };
+    return bot.sendMessage(msg.chat.id, 'Selamat datang di Bot Cloudflare!\n\nMasukkan *Account ID* Cloudflare kamu:', { parse_mode: 'Markdown' });
+  }
+
+  // Sudah daftar tapi belum di-approve
+  if (users[id] && !users[id].approved) {
+    return bot.sendMessage(msg.chat.id, '⏳ Pendaftaran Anda sedang menunggu persetujuan admin. Mohon tunggu.');
+  }
+
+  // User baru: simpan ke users.json & kirim notifikasi ke admin
+  const waktuDaftar = new Date();
+  users[id] = {
+    username: msg.from.username || "",
+    first_name: msg.from.first_name || "",
+    registered_at: waktuDaftar.toISOString(),
+    approved: false
+  };
+  saveUsers(users);
+
+  bot.sendMessage(msg.chat.id, '📝 Pendaftaran berhasil!\nMenunggu persetujuan admin sebelum bisa menggunakan bot.');
+
+  // Kirim notifikasi ke admin
+  const namaUser = (msg.from.username ? `@${msg.from.username}` : '') + (msg.from.first_name ? ` (${msg.from.first_name})` : '');
+  const notif = `🆕 Permintaan pendaftaran user:\nNama: ${namaUser}\nUser ID: ${id}\nWaktu daftar: ${formatDate(waktuDaftar)}\n\nKlik Approve untuk memberi akses.`;
+  bot.sendMessage(ADMIN_TELEGRAM_ID, notif, {
+    reply_markup: {
+      inline_keyboard: [[{ text: '✔️ Approve user', callback_data: `approve_user:${id}` }]]
+    }
+  });
 });
+
+// --- Admin approval handler
+bot.on('callback_query', async (query) => {
+  // Approve user baru
+  if (query.data && query.data.startsWith('approve_user:')) {
+    if (query.from.id.toString() !== ADMIN_TELEGRAM_ID) {
+      bot.answerCallbackQuery(query.id, { text: 'Hanya admin yang bisa approve.' });
+      return;
+    }
+    const approveId = query.data.split(':')[1];
+    const users = loadUsers();
+    if (!users[approveId]) {
+      bot.answerCallbackQuery(query.id, { text: 'User tidak ditemukan.' });
+      return;
+    }
+    if (users[approveId].approved) {
+      bot.answerCallbackQuery(query.id, { text: 'User sudah di-approve.' });
+      return;
+    }
+    users[approveId].approved = true;
+    users[approveId].approved_at = (new Date()).toISOString();
+    saveUsers(users);
+
+    // Notifikasi ke admin & user
+    bot.sendMessage(query.message.chat.id, `✅ User ${users[approveId].username || users[approveId].first_name || approveId} sudah di-approve!`);
+    bot.sendMessage(approveId, '✅ Pendaftaran kamu telah disetujui admin. Silakan /start untuk mulai menggunakan bot.');
+    bot.answerCallbackQuery(query.id, { text: 'Berhasil approve user.' });
+    return;
+  }
+  // Handler lain di bawah...
+});
+
+// --- Middleware: hanya user approved bisa pakai bot
+function ensureApproved(msg, next) {
+  const id = (msg.from && msg.from.id ? msg.from.id.toString() : null);
+  if (!id) return;
+  const users = loadUsers();
+  if (!users[id] || !users[id].approved) {
+    bot.sendMessage(msg.chat.id, '❌ Anda belum terdaftar atau belum disetujui admin. Ketik /start untuk daftar.');
+    return false;
+  }
+  return true;
+}
 
 // --- Handle login stages
 bot.on('message', async (msg) => {
-  // Ignore callback query and commands
-  if (msg.text && msg.text.startsWith('/')) return;
-  if (!session[msg.from.id] || !session[msg.from.id].stage) return;
+  // Ignore /start (karena sudah dihandle di atas)
+  if (msg.text && msg.text.startsWith('/start')) return;
 
-  const user = session[msg.from.id];
+  // Cek approval
+  if (!ensureApproved(msg)) return;
+
+  const id = msg.from.id.toString();
+  if (!session[id] || !session[id].stage) return;
+
+  const user = session[id];
 
   // Stage: input Account ID
   if (user.stage === 'await_account_id') {
@@ -84,7 +187,15 @@ bot.on('message', async (msg) => {
 
 // --- Menu utama (inline keyboard) & binding flow
 bot.on('callback_query', async (query) => {
-  const id = query.from.id;
+  // Handler Approve ada di atas!
+
+  const id = query.from.id.toString();
+  const users = loadUsers();
+  if (!users[id] || !users[id].approved) {
+    bot.answerCallbackQuery(query.id, { text: 'Belum di-approve admin.' });
+    return;
+  }
+
   const user = session[id];
   if (!user || !user.stage) {
     bot.answerCallbackQuery(query.id, { text: 'Silakan login dulu.' });
@@ -92,8 +203,7 @@ bot.on('callback_query', async (query) => {
   }
   const chatId = query.message.chat.id;
 
-  // ===================== MENU UTAMA ===================== //
-  // Saat sudah login
+  // MENU UTAMA
   if (user.stage === 'logged_in') {
     switch (query.data) {
       case 'deploy_worker':
@@ -150,7 +260,6 @@ bot.on('callback_query', async (query) => {
             { headers: { Authorization: `Bearer ${user.api_token}` } }
           );
           if (resp.data && resp.data.result && resp.data.result.length) {
-            // Simpan daftar Worker ke session
             user._worker_list = resp.data.result.map(w => w.id);
             bot.sendMessage(chatId, 'Pilih Worker yang akan di-binding KV:', makeKeyboard(user._worker_list.map(w => ({ text: w, value: w })), 'bindkv_worker'));
             user.stage = 'binding_select_worker';
@@ -181,13 +290,12 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  // ===================== BINDING FLOW ===================== //
+  // ========== BINDING FLOW ==========
   // Step: pilih Worker
   if (user.stage === 'binding_select_worker' && query.data.startsWith('bindkv_worker:')) {
     const workerName = query.data.split(':')[1];
     user._binding_worker = workerName;
 
-    // Ambil daftar KV Namespace
     bot.sendMessage(chatId, 'Memuat daftar KV Namespace...');
     try {
       const resp = await axios.get(
@@ -215,10 +323,8 @@ bot.on('callback_query', async (query) => {
     const kvId = query.data.split(':')[1];
     const workerName = user._binding_worker;
 
-    // Buat binding
     bot.sendMessage(chatId, `Membinding KV "${kvId}" ke Worker "${workerName}"...`);
     try {
-      // PATCH ke script bindings
       const resp = await axios.patch(
         `https://api.cloudflare.com/client/v4/accounts/${user.account_id}/workers/scripts/${workerName}/bindings`,
         [
@@ -244,7 +350,6 @@ bot.on('callback_query', async (query) => {
       bot.sendMessage(chatId, '❌ Gagal binding KV ke Worker.', mainMenu());
     }
     user.stage = 'logged_in';
-    // Bersihkan sementara
     delete user._binding_worker;
     delete user._kv_list;
     delete user._worker_list;
@@ -255,8 +360,11 @@ bot.on('callback_query', async (query) => {
 
 // --- Handler fitur input lanjutan (worker name / KV name / hapus dll)
 bot.on('message', async (msg) => {
-  if (!session[msg.from.id] || !session[msg.from.id].stage) return;
-  const user = session[msg.from.id];
+  if (!ensureApproved(msg)) return;
+
+  const id = msg.from.id.toString();
+  if (!session[id] || !session[id].stage) return;
+  const user = session[id];
 
   // Deploy Worker: input nama → input file JS
   if (user.stage === 'await_worker_name') {
@@ -269,10 +377,8 @@ bot.on('message', async (msg) => {
   if (user.stage === 'await_worker_file' && msg.document) {
     const fileId = msg.document.file_id;
     const fileUrl = await bot.getFileLink(fileId);
-    // Ambil file kode JS
     try {
       const code = (await axios.get(fileUrl)).data;
-      // Deploy ke Cloudflare
       const deployResp = await axios.put(
         `https://api.cloudflare.com/client/v4/accounts/${user.account_id}/workers/scripts/${user.worker_name}`,
         code,
@@ -361,5 +467,4 @@ bot.on('message', async (msg) => {
   }
 });
 
-// --- End of main logic
 console.log('Bot Cloudflare Telegram siap dijalankan!');
