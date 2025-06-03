@@ -1,4 +1,4 @@
-// index.js — Bot Telegram Cloudflare Workers & KV
+// index.js — Bot Telegram Cloudflare Workers & KV + Binding KV ke Worker (FULL FINAL VERSION)
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 
@@ -27,6 +27,15 @@ function mainMenu() {
       ]
     }
   }
+}
+
+// Helper untuk keyboard pilihan dari list
+function makeKeyboard(items, dataPrefix) {
+  return {
+    reply_markup: {
+      inline_keyboard: items.map(item => [{ text: item.text, callback_data: `${dataPrefix}:${item.value}` }])
+    }
+  };
 }
 
 // --- START flow
@@ -73,84 +82,175 @@ bot.on('message', async (msg) => {
   }
 });
 
-// --- Menu utama (inline keyboard)
+// --- Menu utama (inline keyboard) & binding flow
 bot.on('callback_query', async (query) => {
   const id = query.from.id;
   const user = session[id];
-  if (!user || user.stage !== 'logged_in') {
+  if (!user || !user.stage) {
     bot.answerCallbackQuery(query.id, { text: 'Silakan login dulu.' });
     return;
   }
   const chatId = query.message.chat.id;
 
-  switch (query.data) {
-    case 'deploy_worker':
-      user.stage = 'await_worker_name';
-      bot.sendMessage(chatId, 'Masukkan *nama Worker* yang ingin dibuat:', { parse_mode: 'Markdown' });
-      break;
+  // ===================== MENU UTAMA ===================== //
+  // Saat sudah login
+  if (user.stage === 'logged_in') {
+    switch (query.data) {
+      case 'deploy_worker':
+        user.stage = 'await_worker_name';
+        bot.sendMessage(chatId, 'Masukkan *nama Worker* yang ingin dibuat:', { parse_mode: 'Markdown' });
+        break;
 
-    case 'list_workers':
-      bot.sendMessage(chatId, 'Memuat daftar Worker...');
-      try {
-        const resp = await axios.get(
-          `https://api.cloudflare.com/client/v4/accounts/${user.account_id}/workers/scripts`,
-          { headers: { Authorization: `Bearer ${user.api_token}` } }
-        );
-        if (resp.data && resp.data.result && resp.data.result.length) {
-          const list = resp.data.result.map(w => `• ${w.id}`).join('\n');
-          bot.sendMessage(chatId, `Daftar Worker:\n${list}`);
-        } else {
-          bot.sendMessage(chatId, 'Belum ada Worker.');
+      case 'list_workers':
+        bot.sendMessage(chatId, 'Memuat daftar Worker...');
+        try {
+          const resp = await axios.get(
+            `https://api.cloudflare.com/client/v4/accounts/${user.account_id}/workers/scripts`,
+            { headers: { Authorization: `Bearer ${user.api_token}` } }
+          );
+          if (resp.data && resp.data.result && resp.data.result.length) {
+            const list = resp.data.result.map(w => `• ${w.id}`).join('\n');
+            bot.sendMessage(chatId, `Daftar Worker:\n${list}`);
+          } else {
+            bot.sendMessage(chatId, 'Belum ada Worker.');
+          }
+        } catch {
+          bot.sendMessage(chatId, 'Gagal mengambil daftar Worker.');
         }
-      } catch {
-        bot.sendMessage(chatId, 'Gagal mengambil daftar Worker.');
-      }
-      break;
+        break;
 
-    case 'create_kv':
-      user.stage = 'await_kv_name';
-      bot.sendMessage(chatId, 'Masukkan *nama KV Namespace* yang ingin dibuat:', { parse_mode: 'Markdown' });
-      break;
+      case 'create_kv':
+        user.stage = 'await_kv_name';
+        bot.sendMessage(chatId, 'Masukkan *nama KV Namespace* yang ingin dibuat:', { parse_mode: 'Markdown' });
+        break;
 
-    case 'list_kv':
-      bot.sendMessage(chatId, 'Memuat daftar KV Namespace...');
-      try {
-        const resp = await axios.get(
-          `https://api.cloudflare.com/client/v4/accounts/${user.account_id}/storage/kv/namespaces`,
-          { headers: { Authorization: `Bearer ${user.api_token}` } }
-        );
-        if (resp.data && resp.data.result && resp.data.result.length) {
-          const list = resp.data.result.map(kv => `• ${kv.title} (${kv.id})`).join('\n');
-          bot.sendMessage(chatId, `Daftar KV Namespace:\n${list}`);
-        } else {
-          bot.sendMessage(chatId, 'Belum ada KV Namespace.');
+      case 'list_kv':
+        bot.sendMessage(chatId, 'Memuat daftar KV Namespace...');
+        try {
+          const resp = await axios.get(
+            `https://api.cloudflare.com/client/v4/accounts/${user.account_id}/storage/kv/namespaces`,
+            { headers: { Authorization: `Bearer ${user.api_token}` } }
+          );
+          if (resp.data && resp.data.result && resp.data.result.length) {
+            const list = resp.data.result.map(kv => `• ${kv.title} (${kv.id})`).join('\n');
+            bot.sendMessage(chatId, `Daftar KV Namespace:\n${list}`);
+          } else {
+            bot.sendMessage(chatId, 'Belum ada KV Namespace.');
+          }
+        } catch {
+          bot.sendMessage(chatId, 'Gagal mengambil daftar KV Namespace.');
         }
-      } catch {
-        bot.sendMessage(chatId, 'Gagal mengambil daftar KV Namespace.');
-      }
-      break;
+        break;
 
-    case 'bind_kv':
-      bot.sendMessage(chatId, 'Fitur binding KV ke Worker belum diimplementasikan.\n(Siap dikembangkan lanjut)');
-      break;
+      case 'bind_kv':
+        bot.sendMessage(chatId, 'Memuat daftar Worker...');
+        try {
+          const resp = await axios.get(
+            `https://api.cloudflare.com/client/v4/accounts/${user.account_id}/workers/scripts`,
+            { headers: { Authorization: `Bearer ${user.api_token}` } }
+          );
+          if (resp.data && resp.data.result && resp.data.result.length) {
+            // Simpan daftar Worker ke session
+            user._worker_list = resp.data.result.map(w => w.id);
+            bot.sendMessage(chatId, 'Pilih Worker yang akan di-binding KV:', makeKeyboard(user._worker_list.map(w => ({ text: w, value: w })), 'bindkv_worker'));
+            user.stage = 'binding_select_worker';
+          } else {
+            bot.sendMessage(chatId, 'Belum ada Worker untuk di-binding.');
+          }
+        } catch {
+          bot.sendMessage(chatId, 'Gagal mengambil daftar Worker.');
+        }
+        break;
 
-    case 'delete_worker':
-      user.stage = 'await_delete_worker';
-      bot.sendMessage(chatId, 'Masukkan *nama Worker* yang ingin dihapus:', { parse_mode: 'Markdown' });
-      break;
+      case 'delete_worker':
+        user.stage = 'await_delete_worker';
+        bot.sendMessage(chatId, 'Masukkan *nama Worker* yang ingin dihapus:', { parse_mode: 'Markdown' });
+        break;
 
-    case 'delete_kv':
-      user.stage = 'await_delete_kv';
-      bot.sendMessage(chatId, 'Masukkan *ID KV Namespace* yang ingin dihapus:', { parse_mode: 'Markdown' });
-      break;
+      case 'delete_kv':
+        user.stage = 'await_delete_kv';
+        bot.sendMessage(chatId, 'Masukkan *ID KV Namespace* yang ingin dihapus:', { parse_mode: 'Markdown' });
+        break;
 
-    case 'logout':
-      delete session[id];
-      bot.sendMessage(chatId, 'Anda telah logout.\nKetik /start untuk login lagi.');
-      break;
+      case 'logout':
+        delete session[id];
+        bot.sendMessage(chatId, 'Anda telah logout.\nKetik /start untuk login lagi.');
+        break;
+    }
+    bot.answerCallbackQuery(query.id);
+    return;
   }
 
-  bot.answerCallbackQuery(query.id);
+  // ===================== BINDING FLOW ===================== //
+  // Step: pilih Worker
+  if (user.stage === 'binding_select_worker' && query.data.startsWith('bindkv_worker:')) {
+    const workerName = query.data.split(':')[1];
+    user._binding_worker = workerName;
+
+    // Ambil daftar KV Namespace
+    bot.sendMessage(chatId, 'Memuat daftar KV Namespace...');
+    try {
+      const resp = await axios.get(
+        `https://api.cloudflare.com/client/v4/accounts/${user.account_id}/storage/kv/namespaces`,
+        { headers: { Authorization: `Bearer ${user.api_token}` } }
+      );
+      if (resp.data && resp.data.result && resp.data.result.length) {
+        user._kv_list = resp.data.result.map(kv => ({ id: kv.id, title: kv.title }));
+        bot.sendMessage(chatId, 'Pilih KV Namespace yang akan di-binding ke Worker:', makeKeyboard(user._kv_list.map(kv => ({ text: kv.title, value: kv.id })), 'bindkv_kv'));
+        user.stage = 'binding_select_kv';
+      } else {
+        bot.sendMessage(chatId, 'Belum ada KV Namespace untuk di-binding.');
+        user.stage = 'logged_in';
+      }
+    } catch {
+      bot.sendMessage(chatId, 'Gagal mengambil daftar KV Namespace.');
+      user.stage = 'logged_in';
+    }
+    bot.answerCallbackQuery(query.id);
+    return;
+  }
+
+  // Step: pilih KV
+  if (user.stage === 'binding_select_kv' && query.data.startsWith('bindkv_kv:')) {
+    const kvId = query.data.split(':')[1];
+    const workerName = user._binding_worker;
+
+    // Buat binding
+    bot.sendMessage(chatId, `Membinding KV "${kvId}" ke Worker "${workerName}"...`);
+    try {
+      // PATCH ke script bindings
+      const resp = await axios.patch(
+        `https://api.cloudflare.com/client/v4/accounts/${user.account_id}/workers/scripts/${workerName}/bindings`,
+        [
+          {
+            name: "MY_KV", // Bisa diganti sesuai kebutuhan
+            type: "kv_namespace",
+            namespace_id: kvId
+          }
+        ],
+        {
+          headers: {
+            Authorization: `Bearer ${user.api_token}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      if (resp.data && resp.data.success) {
+        bot.sendMessage(chatId, `✅ Sukses binding KV ke Worker!\n\nWorker: ${workerName}\nKV: ${kvId}`, mainMenu());
+      } else {
+        bot.sendMessage(chatId, `❌ Gagal binding KV ke Worker. ${resp.data.errors ? JSON.stringify(resp.data.errors) : ''}`, mainMenu());
+      }
+    } catch (e) {
+      bot.sendMessage(chatId, '❌ Gagal binding KV ke Worker.', mainMenu());
+    }
+    user.stage = 'logged_in';
+    // Bersihkan sementara
+    delete user._binding_worker;
+    delete user._kv_list;
+    delete user._worker_list;
+    bot.answerCallbackQuery(query.id);
+    return;
+  }
 });
 
 // --- Handler fitur input lanjutan (worker name / KV name / hapus dll)
